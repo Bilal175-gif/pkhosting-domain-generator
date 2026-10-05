@@ -1,19 +1,15 @@
 """PKHosting: Domain Name Idea Generator (source ZR-26-00740).
 
 A Streamlit app that turns keywords into domain name ideas: prefix/suffix
-combos, keyword mashups, TLD options, length filters, a heuristic
-"taken-risk" label, and a best-effort DNS resolution check (clearly labeled
-as best-effort — NOT a registrar availability lookup).
+combos, keyword mashups, TLD options, length filters, and a heuristic
+"taken-risk" label.
 """
 
 from __future__ import annotations
 
 import csv
 import io
-import os
 import re
-import socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
 
@@ -33,10 +29,6 @@ NUMBER_BITS = ["24", "365", "360", "101", "hq"]
 
 POPULAR_TLDS = [".com", ".pk", ".net", ".io", ".org", ".co", ".dev", ".app",
                 ".tech", ".store", ".online", ".site"]
-
-# Optional overrides via environment variables (see .env.example).
-DNS_TIMEOUT_SECONDS = float(os.getenv("DNS_TIMEOUT_SECONDS", "3.0"))
-DEFAULT_MAX_LENGTH = int(os.getenv("DEFAULT_MAX_LENGTH", "15"))
 
 
 def clean_keyword(raw: str) -> str:
@@ -137,51 +129,97 @@ def heuristic_taken_risk(name: str, tld: str, style: str) -> str:
     return "Unknown — check a registrar"
 
 
-def dns_resolves(domain: str, timeout: float | None = None) -> bool | None:
-    if timeout is None:
-        timeout = DNS_TIMEOUT_SECONDS
-    """Best-effort DNS A-record check.
-
-    Returns True if the name resolves, False if it does not, None on error.
-    A resolving name is very likely taken; a non-resolving name may still be
-    registered (parked / no DNS). This is NOT a registrar availability check.
-    """
-    try:
-        socket.setdefaulttimeout(timeout)
-        socket.gethostbyname(domain)
-        return True
-    except socket.gaierror:
-        return False
-    except (OSError, UnicodeError):
-        return None
-    finally:
-        socket.setdefaulttimeout(None)
-
-
-def batch_dns_check(domains: list[str], max_workers: int = 20) -> dict[str, bool | None]:
-    out: dict[str, bool | None] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map = {pool.submit(dns_resolves, d): d for d in domains}
-        for fut in as_completed(future_map):
-            out[future_map[fut]] = fut.result()
-    return out
-
-
-def dns_label(status: bool | None) -> str:
-    if status is True:
-        return "Resolves — likely taken"
-    if status is False:
-        return "No DNS record — may still be registered"
-    return "Check failed"
-
-
 def ideas_to_csv(ideas: list[dict]) -> str:
     buf = io.StringIO()
     writer = csv.DictWriter(
         buf, fieldnames=["domain", "name", "tld", "length", "style",
-                         "heuristic", "dns"]
+                         "heuristic"]
     )
     writer.writeheader()
     for idea in ideas:
         writer.writerow({k: idea.get(k, "") for k in writer.fieldnames})
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    st.set_page_config(page_title="PKHosting Domain Idea Generator",
+                       page_icon="🌐", layout="wide")
+    st.title("🌐 PKHosting: Domain Name Idea Generator")
+    st.caption(
+        "Turn keywords into domain name ideas. Heuristic labels are rough "
+        "guesses only — always confirm real availability with a domain "
+        "registrar before buying."
+    )
+
+    with st.sidebar:
+        st.header("Settings")
+        keywords_text = st.text_input(
+            "Keywords (comma or space separated)",
+            value="host, cloud, web",
+            help="e.g. host, cloud, web",
+        )
+        tlds = st.multiselect("TLDs", POPULAR_TLDS,
+                              default=[".com", ".pk", ".net", ".io"])
+        max_len = st.slider("Max name length (before the dot)", 3, 25, 15)
+        st.subheader("Wordplay")
+        use_prefixes = st.checkbox("Add prefixes (get-, my-, pro- …)", value=True)
+        use_suffixes = st.checkbox("Add suffixes (-hub, -ly, -labs …)", value=True)
+        combine = st.checkbox("Combine keywords (hostcloud)", value=True)
+        allow_hyphens = st.checkbox("Allow hyphens", value=False)
+        allow_numbers = st.checkbox("Allow numbers", value=False)
+        generate = st.button("✨ Generate ideas", type="primary",
+                             use_container_width=True)
+
+    if generate:
+        keywords = parse_keywords(keywords_text)
+        if not keywords:
+            st.error("Please enter at least one keyword.")
+            return
+        if not tlds:
+            st.error("Please select at least one TLD.")
+            return
+        ideas = generate_domain_ideas(
+            keywords, tlds, max_len=max_len, use_prefixes=use_prefixes,
+            use_suffixes=use_suffixes, combine_keywords=combine,
+            allow_hyphens=allow_hyphens, allow_numbers=allow_numbers,
+        )
+        st.session_state["ideas"] = ideas
+
+    ideas: list[dict] = st.session_state.get("ideas", [])
+    if not ideas:
+        st.info("Enter keywords in the sidebar and hit **Generate ideas**.")
+        return
+
+    st.subheader(f"💡 {len(ideas)} ideas")
+    st.caption(
+        "*Heuristic labels are rough guesses based on name length, TLD and "
+        "style — they are not availability checks.*"
+    )
+
+    table = [
+        {
+            "Domain": i["domain"],
+            "Length": i["length"],
+            "TLD": i["tld"],
+            "Style": i["style"],
+            "Heuristic": i["heuristic"],
+        }
+        for i in ideas
+    ]
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "⬇️ Download ideas as CSV",
+        data=ideas_to_csv(ideas),
+        file_name="domain-ideas.csv",
+        mime="text/csv",
+        use_container_width=False,
+    )
+
+
+if __name__ == "__main__":
+    main()
